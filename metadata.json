@@ -1,0 +1,7 @@
+{
+  "name": "VoxReport AI",
+  "description": "Plateforme professionnelle de génération de rapports de réunion par IA avec transcription audio/vidéo, gestion de rôles et architecture modulaire.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
