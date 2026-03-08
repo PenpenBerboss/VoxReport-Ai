@@ -33,7 +33,8 @@ const io = new Server(httpServer, {
 
 const angularApp = new AngularNodeAppEngine();
 
-app.use(express.json());
+app.use(express.json({ limit: '250mb' }));
+app.use(express.urlencoded({ limit: '250mb', extended: true }));
 
 interface User {
   id: number | bigint;
@@ -96,9 +97,25 @@ app.get('/api/reports', authenticate, (req: AuthRequest, res: express.Response) 
     return;
   }
   const showArchived = req.query['archived'] === 'true';
-  const reports = db.prepare('SELECT * FROM reports WHERE userId = ? AND isArchived = ? ORDER BY createdAt DESC')
-    .all(req.user.id, showArchived ? 1 : 0);
-  res.json(reports);
+  const page = parseInt(req.query['page'] as string) || 1;
+  const limit = parseInt(req.query['limit'] as string) || 10;
+  const offset = (page - 1) * limit;
+
+  const reports = db.prepare('SELECT * FROM reports WHERE userId = ? AND isArchived = ? ORDER BY createdAt DESC LIMIT ? OFFSET ?')
+    .all(req.user.id, showArchived ? 1 : 0, limit, offset);
+  
+  const total = db.prepare('SELECT COUNT(*) as count FROM reports WHERE userId = ? AND isArchived = ?')
+    .get(req.user.id, showArchived ? 1 : 0) as { count: number };
+
+  res.json({
+    data: reports,
+    pagination: {
+      page,
+      limit,
+      total: total.count,
+      pages: Math.ceil(total.count / limit)
+    }
+  });
 });
 
 app.get('/api/reports/:id', authenticate, (req: AuthRequest, res: express.Response) => {
@@ -129,7 +146,7 @@ app.patch('/api/reports/:id', authenticate, (req: AuthRequest, res: express.Resp
     res.status(400).json({ error: 'Invalid report ID' });
     return;
   }
-  const { status, summary, progress, error, isArchived } = req.body;
+  const { status, summary, progress, error, isArchived, transcript, conclusion, title } = req.body;
   
   const report = db.prepare('SELECT * FROM reports WHERE id = ? AND userId = ?').get(reportId, req.user.id);
   if (!report) {
@@ -137,6 +154,9 @@ app.patch('/api/reports/:id', authenticate, (req: AuthRequest, res: express.Resp
     return;
   }
 
+  if (title !== undefined) {
+    db.prepare('UPDATE reports SET title = ? WHERE id = ?').run(title, reportId);
+  }
   if (status !== undefined) {
     db.prepare('UPDATE reports SET status = ? WHERE id = ?').run(status, reportId);
   }
@@ -149,8 +169,14 @@ app.patch('/api/reports/:id', authenticate, (req: AuthRequest, res: express.Resp
   if (isArchived !== undefined) {
     db.prepare('UPDATE reports SET isArchived = ? WHERE id = ?').run(isArchived ? 1 : 0, reportId);
   }
+  if (transcript !== undefined) {
+    db.prepare('UPDATE reports SET transcript = ? WHERE id = ?').run(typeof transcript === 'string' ? transcript : JSON.stringify(transcript), reportId);
+  }
+  if (conclusion !== undefined) {
+    db.prepare('UPDATE reports SET conclusion = ? WHERE id = ?').run(conclusion, reportId);
+  }
   
-  io.emit(`report:${reportId}:status`, { status, progress, error, isArchived });
+  io.emit(`report:${reportId}:status`, { status, progress, error, isArchived, summary, transcript, conclusion });
   
   res.json({ success: true });
 });
@@ -218,7 +244,10 @@ app.get('/api/reports/:id/file', authenticate, (req: AuthRequest, res: express.R
 });
 
 // Upload & Process
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ 
+  dest: 'uploads/',
+  limits: { fileSize: 250 * 1024 * 1024 } // 250MB
+});
 app.post('/api/reports/upload', authenticate, upload.single('file'), async (req: AuthRequest, res) => {
   if (!req.file || !req.user) {
     res.status(400).json({ error: 'No file uploaded or unauthorized' });
@@ -226,12 +255,12 @@ app.post('/api/reports/upload', authenticate, upload.single('file'), async (req:
   }
 
   const { title } = req.body;
-  const info = db.prepare('INSERT INTO reports (userId, title, originalFileName, filePath, status) VALUES (?, ?, ?, ?, ?)').run(
-    req.user.id, title || req.file.originalname, req.file.originalname, req.file.path, 'processing'
+  const info = db.prepare('INSERT INTO reports (userId, title, originalFileName, filePath, status, progress) VALUES (?, ?, ?, ?, ?, ?)').run(
+    req.user.id, title || req.file.originalname, req.file.originalname, req.file.path, 'pending', 0
   );
   const reportId = info.lastInsertRowid;
 
-  res.json({ id: reportId, status: 'processing' });
+  res.json({ id: reportId, status: 'pending' });
 });
 
 // --- Angular Handling ---

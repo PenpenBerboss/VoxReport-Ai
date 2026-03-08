@@ -1,10 +1,10 @@
-import { Component, OnInit, signal, inject } from '@angular/core';
+import { Component, OnInit, signal, inject, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, RouterModule, Router } from '@angular/router';
-import { ReportService, Report } from '../core/report.service';
+import { ReportService, Report, TranscriptItem } from '../core/report.service';
 import { SocketService } from '../core/socket.service';
 import { MarkdownPipe } from '../core/markdown.pipe';
-import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
+import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Table, TableRow, TableCell, WidthType } from 'docx';
 import { jsPDF } from 'jspdf';
 
 @Component({
@@ -96,6 +96,39 @@ import { jsPDF } from 'jspdf';
                 <div class="prose prose-slate max-w-none">
                   <div class="text-slate-700 text-lg font-light text-justify leading-[1.25] space-y-6" [innerHTML]="r.summary | markdown | async">
                   </div>
+
+                  @if (r.conclusion) {
+                    <div class="mt-10 p-6 bg-indigo-50/50 rounded-2xl border border-indigo-100">
+                      <h3 class="text-xl font-bold text-indigo-900 mb-4 flex items-center gap-2">
+                        <i class="fas fa-flag-checkered"></i>
+                        Conclusion & Prochaines Étapes
+                      </h3>
+                      <div class="text-indigo-800 leading-relaxed" [innerHTML]="r.conclusion | markdown | async"></div>
+                    </div>
+                  }
+
+                  @if (parsedTranscript().length > 0) {
+                    <div class="mt-12 pt-12 border-t border-slate-100">
+                      <h3 class="text-2xl font-bold text-slate-900 mb-8 flex items-center gap-3">
+                        <i class="fas fa-comments text-indigo-600"></i>
+                        Transcription Intégrale
+                      </h3>
+                      
+                      <div class="space-y-8">
+                        @for (item of parsedTranscript(); track $index) {
+                          <div class="flex gap-4">
+                            <div class="flex-shrink-0 w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center text-slate-500 font-bold text-xs">
+                              {{ item.speaker.substring(0, 2).toUpperCase() }}
+                            </div>
+                            <div class="flex-grow">
+                              <div class="font-bold text-slate-900 text-sm mb-1">{{ item.speaker }}</div>
+                              <div class="text-slate-600 leading-relaxed">{{ item.text }}</div>
+                            </div>
+                          </div>
+                        }
+                      </div>
+                    </div>
+                  }
                 </div>
               }
             </div>
@@ -116,6 +149,20 @@ export class ReportDetailComponent implements OnInit {
   private socketService = inject(SocketService);
 
   report = signal<Report | null>(null);
+
+  parsedTranscript = computed(() => {
+    const r = this.report();
+    if (!r || !r.transcript) return [];
+    try {
+      if (typeof r.transcript === 'string') {
+        return JSON.parse(r.transcript) as TranscriptItem[];
+      }
+      return r.transcript as TranscriptItem[];
+    } catch (e) {
+      console.error('Error parsing transcript:', e);
+      return [];
+    }
+  });
 
   ngOnInit() {
     const idParam = this.route.snapshot.paramMap.get('id');
@@ -199,51 +246,89 @@ export class ReportDetailComponent implements OnInit {
     if (!r || !r.summary) return;
 
     const lines = r.summary.split('\n');
-    const children = lines.map(line => {
+    const transcript = this.parsedTranscript();
+    const children: (Paragraph | Table)[] = [];
+    let currentTableRows: TableRow[] = [];
+
+    const flushTable = () => {
+      if (currentTableRows.length > 0) {
+        children.push(new Table({
+          rows: currentTableRows,
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          margins: { top: 100, bottom: 100, left: 100, right: 100 }
+        }));
+        currentTableRows = [];
+      }
+    };
+
+    for (const line of lines) {
       const text = line.trim();
-      if (!text) return new Paragraph({ spacing: { before: 200, after: 200 } });
+      
+      // Table detection
+      if (text.startsWith('|')) {
+        if (text.includes('---')) continue;
+        const cells = text.split('|').map(c => c.trim()).filter((c, i, a) => i > 0 && i < a.length - 1);
+        if (cells.length > 0) {
+          currentTableRows.push(new TableRow({
+            children: cells.map(cell => new TableCell({
+              children: [new Paragraph({ 
+                children: [new TextRun({ text: cell, size: 20, bold: currentTableRows.length === 0 })],
+                alignment: AlignmentType.CENTER
+              })],
+              shading: currentTableRows.length === 0 ? { fill: "F2F2F2" } : undefined
+            }))
+          }));
+          continue;
+        }
+      }
+
+      flushTable();
+
+      if (!text) {
+        children.push(new Paragraph({ spacing: { before: 200, after: 200 } }));
+        continue;
+      }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let heading: any = undefined;
       let bullet = false;
       let leftIndent = 0;
+      let bold = false;
+      let italic = false;
 
-      if (text.startsWith('A. ')) {
-        heading = HeadingLevel.HEADING_1;
-      } else if (text.startsWith('I. ') || text.startsWith('II. ') || text.startsWith('III. ') || text.startsWith('IV. ') || text.startsWith('V. ')) {
+      if (/^\d+\. /.test(text)) {
         heading = HeadingLevel.HEADING_2;
-        leftIndent = 360; // 0.25 inch
-      } else if (text.startsWith('1. ') || text.startsWith('2. ')) {
+      } else if (/^\d+\) /.test(text)) {
         heading = HeadingLevel.HEADING_3;
-        leftIndent = 720; // 0.5 inch
-      } else if (text.startsWith('a) ') || text.startsWith('b) ')) {
-        heading = HeadingLevel.HEADING_4;
-        leftIndent = 1080; // 0.75 inch
-      } else if (text.startsWith('- ') || text.startsWith('-> ')) {
+        leftIndent = 360;
+      } else if (text.startsWith('- ')) {
         bullet = true;
         leftIndent = 720;
+      } else if (text.startsWith('Date :') || text.startsWith('Sujet :') || text.startsWith('Intervenants :') || text.startsWith('Compte-rendu de Réunion :')) {
+        bold = true;
+      } else if (text.startsWith('Note du rédacteur :')) {
+        italic = true;
+        bold = true;
       }
 
-      return new Paragraph({
+      children.push(new Paragraph({
         children: [new TextRun({
-          text: text.replace(/^[A-Z]\. |^[IVX]+\. |^\d+\. |^[a-z]\) |^- |^-> /, ''),
+          text: text.replace(/^\d+\. |^\d+\) |^- /, ''),
           size: heading ? 28 : 24,
+          bold: bold || !!heading,
+          italics: italic
         })],
         heading: heading,
         bullet: bullet ? { level: 0 } : undefined,
         alignment: AlignmentType.JUSTIFIED,
-        spacing: { 
-          line: 300, // 1.25 line spacing (240 * 1.25 = 300)
-          before: 240, 
-          after: 240 
-        },
+        spacing: { line: 300, before: 120, after: 120 },
         indent: { left: leftIndent }
-      });
-    });
+      }));
+    }
+    flushTable();
 
     const doc = new Document({
       sections: [{
-        properties: {},
         children: [
           new Paragraph({
             text: r.title,
@@ -251,7 +336,25 @@ export class ReportDetailComponent implements OnInit {
             alignment: AlignmentType.CENTER,
             spacing: { after: 400 }
           }),
-          ...children
+          ...children,
+          ...(transcript.length > 0 ? [
+            new Paragraph({
+              text: "TRANSCRIPTION",
+              heading: HeadingLevel.HEADING_1,
+              spacing: { before: 800, after: 400 }
+            }),
+            ...transcript.flatMap(item => [
+              new Paragraph({
+                children: [new TextRun({ text: item.speaker, bold: true, size: 24 })],
+                spacing: { before: 200 }
+              }),
+              new Paragraph({
+                children: [new TextRun({ text: item.text, size: 24 })],
+                alignment: AlignmentType.JUSTIFIED,
+                spacing: { after: 200 }
+              })
+            ])
+          ] : [])
         ]
       }]
     });
@@ -269,7 +372,7 @@ export class ReportDetailComponent implements OnInit {
     let y = margin;
     const pageWidth = doc.internal.pageSize.getWidth();
     const maxWidth = pageWidth - (margin * 2);
-    const lineHeight = 7 * 1.25; // 1.25 line spacing
+    const lineHeight = 7;
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(22);
@@ -280,8 +383,17 @@ export class ReportDetailComponent implements OnInit {
     
     lines.forEach(line => {
       const text = line.trim();
-      if (!text) {
-        y += 5;
+      if (!text) { y += 5; return; }
+
+      // Simple table rendering for PDF (text-based)
+      if (text.startsWith('|')) {
+        if (text.includes('---')) return;
+        doc.setFont('courier', 'normal');
+        doc.setFontSize(9);
+        const cells = text.split('|').map(c => c.trim()).filter((c, i, a) => i > 0 && i < a.length - 1);
+        const tableLine = cells.join(' | ');
+        doc.text(tableLine, margin, y);
+        y += lineHeight;
         return;
       }
 
@@ -289,27 +401,27 @@ export class ReportDetailComponent implements OnInit {
       let fontStyle = 'normal';
       let xOffset = margin;
 
-      if (text.startsWith('A. ')) {
-        fontSize = 16;
-        fontStyle = 'bold';
-      } else if (text.startsWith('I. ') || text.startsWith('II. ') || text.startsWith('III. ') || text.startsWith('IV. ') || text.startsWith('V. ')) {
+      if (/^\d+\. /.test(text)) {
         fontSize = 14;
         fontStyle = 'bold';
-        xOffset += 5;
-      } else if (text.startsWith('1. ') || text.startsWith('2. ')) {
+      } else if (/^\d+\) /.test(text)) {
         fontSize = 12;
         fontStyle = 'bold';
-        xOffset += 10;
-      } else if (text.startsWith('a) ') || text.startsWith('b) ') || text.startsWith('- ') || text.startsWith('-> ')) {
+        xOffset += 5;
+      } else if (text.startsWith('- ')) {
         fontSize = 11;
         fontStyle = 'normal';
-        xOffset += 15;
+        xOffset += 10;
+      } else if (text.startsWith('Date :') || text.startsWith('Sujet :') || text.startsWith('Intervenants :') || text.startsWith('Compte-rendu de Réunion :')) {
+        fontStyle = 'bold';
+      } else if (text.startsWith('Note du rédacteur :')) {
+        fontStyle = 'bolditalic';
       }
 
       doc.setFont('helvetica', fontStyle);
       doc.setFontSize(fontSize);
 
-      const cleanText = text.replace(/^[A-Z]\. |^[IVX]+\. |^\d+\. |^[a-z]\) |^- |^-> /, '');
+      const cleanText = text.replace(/^\d+\. |^\d+\) |^- /, '');
       const splitText = doc.splitTextToSize(cleanText, maxWidth - (xOffset - margin));
       
       if (y + (splitText.length * lineHeight) > 280) {
@@ -318,8 +430,35 @@ export class ReportDetailComponent implements OnInit {
       }
 
       doc.text(splitText, xOffset, y, { align: 'justify', maxWidth: maxWidth - (xOffset - margin) });
-      y += (splitText.length * lineHeight) + 4; // Add paragraph spacing
+      y += (splitText.length * lineHeight) + 4;
     });
+
+    const transcript = this.parsedTranscript();
+    if (transcript.length > 0) {
+      if (y > 250) { doc.addPage(); y = margin; } else { y += 10; }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(16);
+      doc.text("TRANSCRIPTION", margin, y);
+      y += 10;
+
+      transcript.forEach(item => {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        if (y > 280) { doc.addPage(); y = margin; }
+        doc.text(item.speaker, margin, y);
+        y += 6;
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(11);
+        const splitText = doc.splitTextToSize(item.text, maxWidth);
+        if (y + (splitText.length * lineHeight) > 280) {
+          doc.addPage();
+          y = margin;
+        }
+        doc.text(splitText, margin, y, { align: 'justify', maxWidth: maxWidth });
+        y += (splitText.length * lineHeight) + 6;
+      });
+    }
 
     doc.save(`${r.title.replace(/\s+/g, '_')}.pdf`);
   }

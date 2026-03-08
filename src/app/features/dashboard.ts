@@ -1,11 +1,11 @@
 import { Component, OnInit, signal, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ReportService, Report } from '../core/report.service';
+import { ReportService, Report, PaginatedReports } from '../core/report.service';
 import { AuthService } from '../core/auth.service';
 import { SocketService } from '../core/socket.service';
 import { RouterModule, ActivatedRoute, Router } from '@angular/router';
 import { FormsModule } from '@angular/forms';
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 @Component({
   selector: 'app-dashboard',
@@ -54,7 +54,7 @@ import { GoogleGenAI } from "@google/genai";
         </div>
 
         <!-- Reports Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-10">
           @for (report of reports(); track report.id) {
             <div class="bg-white p-6 rounded-2xl border border-slate-200 hover:border-indigo-300 hover:shadow-xl transition-all cursor-pointer group relative overflow-hidden flex flex-col">
               
@@ -119,6 +119,31 @@ import { GoogleGenAI } from "@google/genai";
             </div>
           }
         </div>
+
+        <!-- Pagination -->
+        @if (totalPages() > 1) {
+          <div class="flex items-center justify-center gap-2 mt-8 pb-10">
+            <button (click)="changePage(currentPage() - 1)" [disabled]="currentPage() === 1"
+              class="p-2 w-10 h-10 flex items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 disabled:opacity-30 hover:bg-slate-50 transition-all">
+              <i class="fas fa-chevron-left"></i>
+            </button>
+            
+            <div class="flex items-center gap-1">
+              @for (p of [].constructor(totalPages()); track $index) {
+                <button (click)="changePage($index + 1)"
+                  [class]="currentPage() === ($index + 1) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'"
+                  class="w-10 h-10 flex items-center justify-center rounded-xl border font-medium transition-all">
+                  {{ $index + 1 }}
+                </button>
+              }
+            </div>
+
+            <button (click)="changePage(currentPage() + 1)" [disabled]="currentPage() === totalPages()"
+              class="p-2 w-10 h-10 flex items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 disabled:opacity-30 hover:bg-slate-50 transition-all">
+              <i class="fas fa-chevron-right"></i>
+            </button>
+          </div>
+        }
       </main>
 
       <!-- Upload Modal -->
@@ -174,6 +199,10 @@ export class DashboardComponent implements OnInit {
   private router = inject(Router);
 
   reports = signal<Report[]>([]);
+  currentPage = signal(1);
+  totalPages = signal(1);
+  totalItems = signal(0);
+  pageSize = 9;
   showArchived = signal(false);
   showUpload = signal(false);
   uploadTitle = '';
@@ -211,7 +240,23 @@ export class DashboardComponent implements OnInit {
   }
 
   loadReports() {
-    this.reportService.getReports(this.showArchived()).subscribe((res: Report[]) => this.reports.set(res));
+    this.reportService.getReports(this.showArchived(), this.currentPage(), this.pageSize).subscribe({
+      next: (res: PaginatedReports) => {
+        this.reports.set(res.data);
+        this.totalPages.set(res.pagination.pages);
+        this.totalItems.set(res.pagination.total);
+      },
+      error: (err) => {
+        console.error('Erreur chargement rapports:', err);
+      }
+    });
+  }
+
+  changePage(page: number) {
+    if (page < 1 || page > this.totalPages()) return;
+    this.currentPage.set(page);
+    this.loadReports();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   toggleArchived() {
@@ -329,44 +374,63 @@ export class DashboardComponent implements OnInit {
       this.updateStatus(reportId, 'analyzing', 60);
       simulatedProgress = Math.max(simulatedProgress, 60);
       
-      const prompt = `Tu es un assistant professionnel expert en rédaction de comptes-rendus de réunion. 
-      Analyse ce fichier audio/vidéo et génère un rapport final extrêmement structuré, optimisé pour une exportation Microsoft Word et PDF.
+      const prompt = `Tu es un expert en rédaction de comptes-rendus de réunions professionnelles.
+      Analyse le fichier audio/vidéo joint et génère un rapport structuré EXACTEMENT selon le modèle suivant.
+      
+      STRUCTURE DU RAPPORT (À SUIVRE RIGOUREUSEMENT) :
+      
+      [TITRE COURT DE LA RÉUNION] (ex: SPRINT du 02/04)
+      
+      Voici le compte-rendu structuré de la réunion basé sur l'enregistrement fourni.
+      
+      Compte-rendu de Réunion : [TITRE DÉTAILLÉ]
+      Date : [DATE DE LA RÉUNION]
+      Sujet : [SUJET PRINCIPAL]
+      Intervenants : [LISTE DES PARTICIPANTS ET LEURS RÔLES]
+      
+      1. Résumé Exécutif
+      [Un paragraphe synthétique présentant l'essentiel de la réunion]
+      
+      2. Points Clés Discutés
+         1) [Sous-titre du point 1] :
+         [Détails du point 1]
+         2) [Sous-titre du point 2] :
+         [Détails du point 2]
+         ...
+      
+      3. Décisions Prises
+      [Liste des décisions ou "Aucune décision formelle n'a été arrêtée lors de cette session."]
+      
+      4. Liste d'actions à entreprendre (To-Do List)
+      | Action | Responsable | Échéance |
+      | :--- | :--- | :--- |
+      | [Tâche] | [Nom] | [Date] |
+      
+      5. Transcription Synthétique par Intervenant
+      [Nom de l'intervenant 1] : ([Rôle]) :
+      - [Point abordé 1]
+      - [Point abordé 2]
+      
+      [Nom de l'intervenant 2] : ([Rôle]) :
+      - [Point abordé 1]
+      
+      Note du rédacteur : [Une analyse critique ou une remarque sur la teneur des échanges]
       
       CONSIGNES DE FORMATAGE :
-      - Évite les caractères spéciaux et les emojis.
-      - Utilise une hiérarchie de titres stricte : A, I, 1, a).
-      - Utilise des puces standard et des flèches (->) pour les détails.
-      - Le ton doit être formel, juridique ou administratif.
+      - Utilise des puces standard (-) pour les listes.
+      - Utilise le format de tableau Markdown pour la To-Do List.
+      - Le ton doit être formel et administratif.
       
-      STRUCTURE DU RAPPORT :
+      STRUCTURE DU RAPPORT ATTENDUE (JSON) :
+      - title: Le titre court (ex: SPRINT du 02/04).
+      - summary: Le corps du rapport complet (sections 1 à 5 + Note du rédacteur) formaté en Markdown.
+      - conclusion: Une synthèse très courte (1-2 phrases) de l'issue finale.
+      - transcript: Liste d'objets { speaker: string, text: string } identifiant chaque prise de parole.
       
-      A. COMPTE-RENDU : [Titre de la réunion]
-      
-      I. RÉSUMÉ EXÉCUTIF
-      [Un paragraphe synthétique présentant l'objet et les conclusions de la réunion]
-      
-      II. POINTS CLÉS DE LA DISCUSSION
-      1. [Premier sujet principal]
-         a) [Sous-point ou détail]
-         b) [Sous-point ou détail]
-      2. [Deuxième sujet principal]
-         a) [Sous-point ou détail]
-      
-      III. DÉCISIONS ACTÉES
-      -> [Décision 1]
-      -> [Décision 2]
-      
-      IV. PLAN D'ACTION ET ÉCHÉANCES
-      [Liste des tâches sous forme de liste à puces]
-      - [Tâche] : [Responsable] - [Échéance]
-      
-      V. TRANSCRIPTION SYNTHÉTIQUE
-      [Résumé structuré des échanges, sans répétitions ni hésitations]
-      
-      Réponds exclusivement en français.`;
+      Réponds exclusivement au format JSON.`;
 
       const result = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-2.5-flash",
         contents: [
           {
             parts: [
@@ -379,14 +443,46 @@ export class DashboardComponent implements OnInit {
               { text: prompt }
             ]
           }
-        ]
+        ],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              summary: { type: Type.STRING },
+              conclusion: { type: Type.STRING },
+              transcript: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    speaker: { type: Type.STRING },
+                    text: { type: Type.STRING }
+                  },
+                  required: ["speaker", "text"]
+                }
+              }
+            },
+            required: ["title", "summary", "conclusion", "transcript"]
+          }
+        }
       });
 
       this.updateStatus(reportId, 'generating_summary', 90);
       simulatedProgress = Math.max(simulatedProgress, 90);
-      const text = result.text;
+      
+      const responseText = result.text;
+      const parsed = JSON.parse(responseText || '{}');
 
-      this.reportService.updateReport(reportId, { status: 'completed', summary: text, progress: 100 }).subscribe();
+      this.reportService.updateReport(reportId, { 
+        status: 'completed', 
+        title: parsed.title,
+        summary: parsed.summary, 
+        conclusion: parsed.conclusion,
+        transcript: JSON.stringify(parsed.transcript),
+        progress: 100 
+      }).subscribe();
     } catch (error: unknown) {
       console.error('Processing error:', error);
       this.reportService.updateReport(reportId, { status: 'error', progress: 0 }).subscribe();

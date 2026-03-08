@@ -2,6 +2,11 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { AuthService } from './auth.service';
 
+export interface TranscriptItem {
+  speaker: string;
+  text: string;
+}
+
 export interface Report {
   id: number;
   userId: number;
@@ -11,8 +16,20 @@ export interface Report {
   isArchived?: boolean;
   originalFileName: string;
   transcription?: string;
+  transcript?: string | TranscriptItem[]; // Can be string from DB or parsed array
   summary?: string;
+  conclusion?: string;
   createdAt: string;
+}
+
+export interface PaginatedReports {
+  data: Report[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    pages: number;
+  };
 }
 
 @Injectable({ providedIn: 'root' })
@@ -26,8 +43,8 @@ export class ReportService {
     });
   }
 
-  getReports(archived = false) {
-    return this.http.get<Report[]>(`/api/reports?archived=${archived}`, { headers: this.getHeaders() });
+  getReports(archived = false, page = 1, limit = 10) {
+    return this.http.get<PaginatedReports>(`/api/reports?archived=${archived}&page=${page}&limit=${limit}`, { headers: this.getHeaders() });
   }
 
   getReport(id: number) {

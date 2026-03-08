@@ -40,5 +40,15 @@ try {
 } catch {
   // Column might already exist
 }
+try {
+  db.prepare('ALTER TABLE reports ADD COLUMN transcript TEXT').run();
+} catch {
+  // Column might already exist
+}
+try {
+  db.prepare('ALTER TABLE reports ADD COLUMN conclusion TEXT').run();
+} catch {
+  // Column might already exist
+}
 
 export default db;
